@@ -2072,6 +2072,7 @@ class FCDv2Client(ERM):
 
         self._last_losses = {
             "task": loss_task.item() * batch_size,
+            "task_orig": ce_orig.item() * batch_size,
             "inv": loss_inv.item() * batch_size,
             "stat": loss_stat.item() * batch_size,
             "cov_cross": loss_cov.item() * batch_size,
@@ -2108,7 +2109,7 @@ class FCDv2Client(ERM):
     def fit(self, server_round):
         self.current_server_round = server_round
         self.init_train()
-        loss_keys = ["task", "inv", "stat", "cov_cross", "var", "cf"]
+        loss_keys = ["task", "task_orig", "inv", "stat", "cov_cross", "var", "cf"]
         total_training_loss = 0.0
         loss_accum = {k: 0.0 for k in loss_keys}
 

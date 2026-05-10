@@ -1055,6 +1055,13 @@ class FCDv2Server(FedAvg):
             self.aggregator_type, dim=proj_dim, hparam=hparam
         )
 
+        # Per-round diagnostics populated during training.
+        self._last_agg_heldout_ll = None
+        self._eval_subset_loader = None
+        # Loader used for end-of-training analyses (linear probes, CF fidelity);
+        # populated by register_testloader once dataloaders are known.
+        self._final_eval_loader = None
+
     # ── Model setup ───────────────────────────────────────────────
 
     def setup_model(self, model_file=None, start_epoch=0):
@@ -1097,6 +1104,20 @@ class FCDv2Server(FedAvg):
                 copy.deepcopy(self._style_encoder),
             )
 
+    def register_testloader(self, dataloaders):
+        super().register_testloader(dataloaders)
+        # Pick the first available split that contains at least 2 source domains
+        # for the per-round effective-rank diagnostic. id_val mirrors the
+        # training distribution; val/test are out-of-distribution for LODO.
+        for key in ("id_val", "val", "id_test", "test"):
+            if key in self.test_dataloader:
+                self._eval_subset_loader = self.test_dataloader[key]
+                break
+        # Pool all available splits for end-of-training feature extraction so
+        # the linear probe sees every source domain (and the held-out one for
+        # CF fidelity, where applicable).
+        self._final_eval_loader = self.test_dataloader
+
     # ── Transmission ──────────────────────────────────────────────
 
     def transmit_model(self, sampled_client_indices=None):
@@ -1138,10 +1159,42 @@ class FCDv2Server(FedAvg):
         i = torch.cat(all_indices, dim=0)
         self.aggregator.fit(x, i)
 
+        # Diagnostic: refit a fresh aggregator on an 80/20 split of the same
+        # pseudo-samples, then report mean log-likelihood on the held-out 20%.
+        # The production aggregator above is unaffected.
+        self._last_agg_heldout_ll = self._compute_aggregator_heldout_ll(x, i)
+
+    def _compute_aggregator_heldout_ll(self, x, i):
+        from .fcdv2_aggregators import build_aggregator
+
+        n = x.shape[0]
+        if n < 5:
+            return None
+
+        rng = torch.Generator().manual_seed(self._round + 1)
+        perm = torch.randperm(n, generator=rng)
+        n_train = max(1, int(0.8 * n))
+        tr_idx, va_idx = perm[:n_train], perm[n_train:]
+        if va_idx.numel() == 0:
+            return None
+
+        proj_dim = int(self.hparam.get("fcd_proj_dim", 256))
+        diag_agg = build_aggregator(
+            self.aggregator_type, dim=proj_dim, hparam=self.hparam
+        )
+        try:
+            diag_agg.fit(x[tr_idx], i[tr_idx])
+            with torch.no_grad():
+                ll = diag_agg.log_prob(x[va_idx]).mean().item()
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("aggregator held-out LL failed: %s", exc)
+            return None
+        return ll
+
     # ── Per-round training loop ───────────────────────────────────
 
     def update_clients(self, sampled_client_indices):
-        loss_keys = ["total", "task", "inv", "stat", "cov_cross", "var", "cf"]
+        loss_keys = ["total", "task", "task_orig", "inv", "stat", "cov_cross", "var", "cf"]
         agg_losses = {k: 0.0 for k in loss_keys}
         selected_total_size = 0
 
@@ -1174,6 +1227,76 @@ class FCDv2Server(FedAvg):
         ]
         self.aggregate(sampled_client_indices, mixing_coefficients)
         self.aggregate_style(sampled_client_indices)
+
+        # Per-round diagnostics: log aggregator held-out LL and the
+        # effective ranks (participation ratios) of z_inv / z_env on a
+        # fixed validation subset.
+        diag = {}
+        if self._last_agg_heldout_ll is not None:
+            diag["server/agg_heldout_ll"] = self._last_agg_heldout_ll
+        if self._eval_subset_loader is not None:
+            er_inv, er_env = self._compute_effective_ranks(self._eval_subset_loader)
+            if er_inv is not None:
+                diag["server/eff_rank_z_inv"] = er_inv
+                diag["server/eff_rank_z_env"] = er_env
+
+        if diag and self.hparam.get("wandb", False):
+            wandb.log(
+                diag, step=self._round * self.hparam.get("local_epochs", 1)
+            )
+
+    # ── Diagnostics ───────────────────────────────────────────────
+
+    @staticmethod
+    def _participation_ratio(z):
+        """(sum eig)^2 / sum eig^2 of the empirical covariance of ``z``."""
+        if z.ndim != 2 or z.shape[0] < 2:
+            return None
+        z_c = z - z.mean(dim=0, keepdim=True)
+        denom = max(z_c.shape[0] - 1, 1)
+        cov = (z_c.T @ z_c) / denom
+        # Symmetrise to suppress numerical asymmetry before eigvalsh.
+        cov = 0.5 * (cov + cov.T)
+        eigvals = torch.linalg.eigvalsh(cov).clamp_min(0.0)
+        s1 = eigvals.sum()
+        s2 = (eigvals * eigvals).sum()
+        if s2.item() <= 0.0:
+            return None
+        return float((s1 * s1 / s2).item())
+
+    @torch.no_grad()
+    def _compute_effective_ranks(self, dataloader):
+        """Return (eff_rank_z_inv, eff_rank_z_env) on the supplied loader."""
+        self.model.to(self.device)
+        # Featurizer needs train() so the env head is exercised, but we wrap in
+        # no_grad so nothing else is updated.
+        self._featurizer.train()
+        self._featurizer.to(self.device)
+
+        z_inv_chunks, z_env_chunks = [], []
+        try:
+            for batch in dataloader:
+                x = batch[0].to(self.device)
+                H = self._featurizer.backbone(x)
+                pooled = self._featurizer.gap(H).flatten(1)
+                z_inv = self._featurizer.h_inv(pooled)
+                z_env = self._featurizer.h_env(pooled)
+                z_inv_chunks.append(z_inv.detach().cpu())
+                z_env_chunks.append(z_env.detach().cpu())
+        finally:
+            self._featurizer.eval()
+            self.model.to("cpu")
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+
+        if not z_inv_chunks:
+            return None, None
+        z_inv_all = torch.cat(z_inv_chunks, dim=0)
+        z_env_all = torch.cat(z_env_chunks, dim=0)
+        return (
+            self._participation_ratio(z_inv_all),
+            self._participation_ratio(z_env_all),
+        )
 
     # ── Evaluation ────────────────────────────────────────────────
 
@@ -1211,3 +1334,121 @@ class FCDv2Server(FedAvg):
                 torch.cuda.empty_cache()
         self.model.to("cpu")
         return metric[0]
+
+    # ── End-of-training evaluation ────────────────────────────────
+
+    def fit(self):
+        super().fit()
+        if self.hparam.get("fcdv2_skip_final_eval", False):
+            return
+        try:
+            self._final_evaluation()
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("FCDv2 final evaluation failed: %s", exc)
+
+    def _final_evaluation(self):
+        from .fcdv2_eval import (
+            counterfactual_fidelity,
+            extract_features,
+            per_domain_accuracy,
+            _linear_probe_acc,
+        )
+
+        summary = {}
+
+        # Per-train-domain accuracy --------------------------------------
+        try:
+            per_dom = per_domain_accuracy(
+                self.model,
+                self.ds_bundle,
+                self.ds_bundle.dataset,
+                self.device,
+                batch_size=int(self.hparam.get("batch_size", 32)),
+            )
+            for d, acc in per_dom.items():
+                summary[f"final/train_acc_domain_{d}"] = acc
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("per-domain accuracy failed: %s", exc)
+
+        # Linear probes & CF fidelity ------------------------------------
+        loader_for_probe = self._eval_subset_loader
+        if loader_for_probe is None:
+            logging.warning("no held-out loader registered; skipping probes")
+        else:
+            feats = extract_features(self._featurizer, loader_for_probe, self.device)
+            n_classes = int(self.ds_bundle.dataset.n_classes)
+            uniq_d = torch.unique(feats["d"]).tolist()
+            n_domains = max(len(uniq_d), 2)
+            # Remap domain ids to a contiguous range so the probe can use them.
+            d_remap = {v: i for i, v in enumerate(sorted(uniq_d))}
+            d_relabelled = torch.tensor([d_remap[int(v)] for v in feats["d"]])
+
+            seed = int(self.hparam.get("seed", 0))
+            probes = {
+                ("z_inv", "class"): _linear_probe_acc(
+                    feats["z_inv"], feats["y"], n_classes, seed=seed
+                ),
+                ("z_inv", "domain"): _linear_probe_acc(
+                    feats["z_inv"], d_relabelled, n_domains, seed=seed
+                ),
+                ("z_env", "class"): _linear_probe_acc(
+                    feats["z_env"], feats["y"], n_classes, seed=seed
+                ),
+                ("z_env", "domain"): _linear_probe_acc(
+                    feats["z_env"], d_relabelled, n_domains, seed=seed
+                ),
+            }
+            for (z, label), v in probes.items():
+                if v is not None:
+                    summary[f"final/probe_{z}_to_{label}"] = v
+
+            # Group features by raw domain id for CF fidelity.
+            features_by_domain = {}
+            for d in uniq_d:
+                mask = feats["d"] == d
+                features_by_domain[int(d)] = {
+                    "z_env": feats["z_env"][mask],
+                    "H_mu": feats["H_mu"][mask],
+                    "H_sigma": feats["H_sigma"][mask],
+                }
+
+            try:
+                self._style_encoder.eval()
+                mean_l2_mu, mean_l2_sigma, pair_results = counterfactual_fidelity(
+                    self._style_encoder,
+                    features_by_domain,
+                    self.device,
+                    n_samples=int(self.hparam.get("fcdv2_cf_n_samples", 256)),
+                    seed=seed,
+                )
+                if mean_l2_mu is not None:
+                    summary["final/cf_fidelity_l2_mu_mean"] = mean_l2_mu
+                    summary["final/cf_fidelity_l2_sigma_mean"] = mean_l2_sigma
+                    for r in pair_results:
+                        summary[
+                            f"final/cf_fidelity_l2_mu/{r['src']}->{r['tgt']}"
+                        ] = r["l2_mu"]
+                        summary[
+                            f"final/cf_fidelity_l2_sigma/{r['src']}->{r['tgt']}"
+                        ] = r["l2_sigma"]
+            finally:
+                self._style_encoder.to("cpu")
+
+        # OOD test accuracy already logged per-round; lift latest into summary
+        if "test" in self.test_dataloader:
+            try:
+                metric = self.evaluate_global_model(self.test_dataloader["test"])
+                summary[f"final/test_{self.ds_bundle.key_metric}"] = float(
+                    metric[self.ds_bundle.key_metric]
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("final OOD test eval failed: %s", exc)
+
+        if self.hparam.get("wandb", False):
+            for k, v in summary.items():
+                wandb.run.summary[k] = v
+            wandb.log(summary)
+        else:
+            print("[FCDv2 final-eval]")
+            for k, v in summary.items():
+                print(f"  {k}: {v}")
