@@ -17,6 +17,24 @@ from .models import *
 from .utils import *
 
 
+def _sample_gaussian(mu, cov, size, rng):
+    """Draw `size` samples from N(mu, cov), fast-pathing diagonal covariances.
+
+    `compute_local_env_stats` always builds `cov = torch.diag(var + eps)`, but
+    `numpy.random.Generator.multivariate_normal` falls back to a full SVD of the
+    cov matrix regardless. SVDing a 1024x1024 dense matrix per client per round
+    used to dominate the wall clock; for diagonal covariances the SVD is
+    pointless, so detect that and use a Gaussian on the diagonal directly.
+    """
+    cov = np.asarray(cov)
+    if cov.ndim == 2 and cov.shape[0] == cov.shape[1]:
+        diag = np.diag(cov)
+        if np.allclose(cov, np.diag(diag)):
+            std = np.sqrt(np.maximum(diag, 0.0))
+            return mu + std * rng.standard_normal(size=(size, mu.shape[0]))
+    return rng.multivariate_normal(mu, cov, size=size)
+
+
 class FedAvg(object):
     def __init__(self, device, ds_bundle, hparam):
         self.ds_bundle = ds_bundle
@@ -116,15 +134,26 @@ class FedAvg(object):
             self.clients[idx].client_evaluate()
 
     def aggregate(self, sampled_client_indices, coefficients):
-        """Average the updated and transmitted parameters from each selected client."""
+        """Average the updated and transmitted parameters from each selected client.
+
+        Each client's model lives on CPU after `end_train()`; doing the scaled
+        accumulation on CPU with default OMP threading thrashes badly when the
+        client count and parameter count are both large. We do the math on the
+        global model's device instead, which is mathematically equivalent to the
+        original Python expression but offloads the heavy work to the GPU.
+        """
+        target_device = next(self.model.parameters()).device
+        keys = list(self.model.state_dict().keys())
         averaged_weights = OrderedDict()
         for it, idx in tqdm(enumerate(sampled_client_indices), leave=False):
             local_weights = self.clients[idx].model.state_dict()
-            for key in self.model.state_dict().keys():
+            coeff = float(coefficients[it])
+            for key in keys:
+                w = local_weights[key].to(target_device, non_blocking=True)
                 if it == 0:
-                    averaged_weights[key] = coefficients[it] * local_weights[key]
+                    averaged_weights[key] = coeff * w
                 else:
-                    averaged_weights[key] += coefficients[it] * local_weights[key]
+                    averaged_weights[key] += coeff * w
         self.model.load_state_dict(averaged_weights)
 
     def train_federated_model(self):
@@ -899,7 +928,7 @@ class FCDServer(FedAvg):
         from sklearn.mixture import GaussianMixture
 
         all_pseudo_samples = []
-        for idx in sampled_client_indices:
+        for idx in tqdm(sampled_client_indices, desc="aggregate_gmm: pseudo-sampling", leave=False):
             client = self.clients[idx]
             if not hasattr(client, "local_env_stats") or client.local_env_stats is None:
                 continue
@@ -909,7 +938,7 @@ class FCDServer(FedAvg):
 
             # Generate pseudo-samples from this client's Gaussian
             rng = np.random.default_rng(seed=self._round * 1000 + idx)
-            pseudo = rng.multivariate_normal(mu, cov, size=self.fcd_gmm_pseudo_samples)
+            pseudo = _sample_gaussian(mu, cov, self.fcd_gmm_pseudo_samples, rng)
             all_pseudo_samples.append(pseudo)
 
         if len(all_pseudo_samples) == 0:
@@ -1141,14 +1170,14 @@ class FCDv2Server(FedAvg):
         """
         all_samples = []
         all_indices = []
-        for idx in sampled_client_indices:
+        for idx in tqdm(sampled_client_indices, desc="aggregate_style: pseudo-sampling", leave=False):
             client = self.clients[idx]
             if not hasattr(client, "local_env_stats") or client.local_env_stats is None:
                 continue
             mu = client.local_env_stats["mean"]
             cov = client.local_env_stats["covariance"]
             rng = np.random.default_rng(seed=self._round * 1000 + idx)
-            pseudo = rng.multivariate_normal(mu, cov, size=self.fcd_gmm_pseudo_samples)
+            pseudo = _sample_gaussian(mu, cov, self.fcd_gmm_pseudo_samples, rng)
             all_samples.append(torch.tensor(pseudo, dtype=torch.float32))
             all_indices.append(torch.full((len(pseudo),), idx, dtype=torch.long))
 

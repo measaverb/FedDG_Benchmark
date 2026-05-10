@@ -22,7 +22,7 @@
   "client_method": "FCDv2Client",
   "fcd_backbone": "resnet18",
   "fcd_proj_dim": 256,
-  "fcd_gmm_pseudo_samples": 200,
+  "fcd_gmm_pseudo_samples": 1000,
   "fcd_cf_start_round": 1,
   "aggregator_type": "gaussian",
   "fcdv2_lambda_task": 1.0,
