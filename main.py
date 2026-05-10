@@ -325,5 +325,62 @@ if __name__ == "__main__":
         help="Augmentation source for FCD counterfactual pathway ablation",
     )
 
+    # FCDv2 (parallel method to FCD with pluggable style aggregator)
+    parser.add_argument(
+        "--aggregator_type",
+        default="gmm",
+        type=str,
+        choices=["gaussian", "gmm", "vae", "realnvp"],
+        help="FCDv2 federated style aggregator over z_env",
+    )
+    parser.add_argument(
+        "--fcdv2_lambda_task", default=1.0, type=float, help="FCDv2 task loss weight"
+    )
+    parser.add_argument(
+        "--fcdv2_lambda_inv", default=1.0, type=float, help="FCDv2 invariance loss weight"
+    )
+    parser.add_argument(
+        "--fcdv2_lambda_stat",
+        default=1.0,
+        type=float,
+        help="FCDv2 statistical grounding loss weight",
+    )
+    parser.add_argument(
+        "--fcdv2_lambda_cov",
+        default=1.0,
+        type=float,
+        help="FCDv2 cross-subspace orthogonality weight",
+    )
+    parser.add_argument(
+        "--fcdv2_lambda_var",
+        default=1.0,
+        type=float,
+        help="FCDv2 VICReg-style variance preservation weight",
+    )
+    parser.add_argument(
+        "--fcdv2_vae_latent_dim",
+        default=32,
+        type=int,
+        help="FCDv2 VAE aggregator latent dim",
+    )
+    parser.add_argument(
+        "--fcdv2_vae_epochs",
+        default=50,
+        type=int,
+        help="FCDv2 VAE aggregator training epochs per round",
+    )
+    parser.add_argument(
+        "--fcdv2_realnvp_layers",
+        default=6,
+        type=int,
+        help="Number of coupling layers in the FCDv2 RealNVP aggregator",
+    )
+    parser.add_argument(
+        "--fcdv2_realnvp_epochs",
+        default=100,
+        type=int,
+        help="FCDv2 RealNVP aggregator training epochs per round",
+    )
+
     args = parser.parse_args()
     main(args)
