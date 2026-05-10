@@ -711,3 +711,31 @@ class FCDModelWrapper(nn.Module):
         else:
             z_inv = self.featurizer(x)
             return self.classifier(z_inv)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FCDv2 (Federated Cyclic Disentanglement v2) components
+#
+# Architecturally identical to FCD (same backbone + h_inv + h_env +
+# style encoder + classifier). The differences are:
+#   * the client applies a twin-view augmentation pipeline and computes
+#     a five-term loss (L_task, L_inv, L_stat, L_cov_cross, L_var)
+#   * the server fits a pluggable FederatedStyleAggregator
+#     (gaussian / gmm / vae / realnvp) instead of a hardcoded GMM
+#   * the prototype alignment loss L_align is dropped entirely
+#
+# Subclasses are kept as no-op renames so the FCDv2 code path is fully
+# decoupled from FCD even though the modules behave identically.
+# ═══════════════════════════════════════════════════════════════════
+
+
+class FCDv2Featurizer(FCDFeaturizer):
+    """Same architecture as FCDFeaturizer; renamed for FCDv2 clarity."""
+
+
+class FCDv2ModelWrapper(FCDModelWrapper):
+    """Same forward signature as FCDModelWrapper; renamed for FCDv2 clarity.
+
+    FCDv2 calls this wrapper twice per step (once per augmented view) and
+    composes the five-term loss at the client level.
+    """

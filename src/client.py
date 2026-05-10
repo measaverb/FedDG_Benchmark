@@ -1840,3 +1840,303 @@ class FCDClient(ERM):
             "cov_cross": total_loss_accum["cov_cross"] / n_total,
             "cf": total_loss_accum["cf"] / n_total,
         }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FCDv2 client
+#
+# Five-term objective:
+#     L_total = lambda_task * L_task        (CE, original + cyclic, both views)
+#             + lambda_inv  * L_inv         (BYOL-style ||z_inv_1 - z_inv_2||^2)
+#             + lambda_stat * L_stat        (statistical grounding, both views)
+#             + lambda_cov  * L_cov_cross   (cross-subspace orthogonality)
+#             + lambda_var  * L_var         (VICReg variance preservation)
+#
+# Differences vs FCD:
+#   * Two augmented views per sample via TwinViewAugmenter
+#   * L_align (prototype alignment) and the internal-decorrelation half
+#     of L_cov are dropped
+#   * Cyclic counterfactual sampling uses a pluggable
+#     FederatedStyleAggregator (gaussian / gmm / vae / realnvp) supplied
+#     by the server, not a hardcoded GMM
+# ═══════════════════════════════════════════════════════════════════
+
+
+class FCDv2Client(ERM):
+    """FCDv2 client: twin-view augmentation + five-term loss + cyclic CF.
+
+    The aggregator object is set per round by the server via
+    ``set_aggregator``. When the aggregator is missing or unfitted (e.g.
+    round 0), the cyclic pathway is skipped and the task loss reduces to
+    the cross-entropy on the two augmented original-view forwards.
+    """
+
+    def __init__(self, client_id, device, dataset, ds_bundle, hparam):
+        super().__init__(client_id, device, dataset, ds_bundle, hparam)
+        from .fcdv2_augmentations import TwinViewAugmenter
+
+        self.lambda_task = hparam.get("fcdv2_lambda_task", 1.0)
+        self.lambda_inv = hparam.get("fcdv2_lambda_inv", 1.0)
+        self.lambda_stat = hparam.get("fcdv2_lambda_stat", 1.0)
+        self.lambda_cov = hparam.get("fcdv2_lambda_cov", 1.0)
+        self.lambda_var = hparam.get("fcdv2_lambda_var", 1.0)
+        self.eps = hparam.get("eps", 1e-8)
+        self.fcd_cf_start_round = hparam.get("fcd_cf_start_round", 1)
+
+        self.augmenter = TwinViewAugmenter()
+        self.aggregator = None  # set per round by FCDv2Server.transmit_model
+        self.local_env_stats = None
+
+    # ── Setup ─────────────────────────────────────────────────────
+
+    def setup_model(self, featurizer, classifier, style_encoder):
+        from .models import FCDv2ModelWrapper
+
+        self._featurizer = featurizer
+        self._classifier = classifier
+        self._style_encoder = style_encoder
+        self.featurizer = nn.DataParallel(self._featurizer)
+        self.classifier = nn.DataParallel(self._classifier)
+        self.model = nn.DataParallel(
+            FCDv2ModelWrapper(self._featurizer, self._classifier, self._style_encoder)
+        )
+
+    def update_model(self, model_dict):
+        self.model.load_state_dict(model_dict)
+
+    def set_aggregator(self, aggregator):
+        """Receive the latest fitted aggregator from the server."""
+        self.aggregator = aggregator
+
+    # ── Forward ───────────────────────────────────────────────────
+
+    def process_batch(self, batch):
+        """Run the model on two augmented views of the input.
+
+        Returns a dict with per-view tensors keyed ``*_1`` / ``*_2`` plus
+        the labels and metadata that are shared across views.
+        """
+        x, y_true, metadata = batch
+        x = x.to(self.device)
+        y_true = y_true.to(self.device)
+        g = self.ds_bundle.grouper.metadata_to_group(metadata).to(self.device)
+        metadata = metadata.to(self.device)
+
+        x1, x2 = self.augmenter(x)
+
+        logits_1, z_inv_1, z_env_1, H_1, gamma_1, beta_1 = self.model(x1)
+        logits_2, z_inv_2, z_env_2, H_2, gamma_2, beta_2 = self.model(x2)
+
+        return {
+            "g": g,
+            "y_true": y_true,
+            "metadata": metadata,
+            "logits_1": logits_1,
+            "z_inv_1": z_inv_1,
+            "z_env_1": z_env_1,
+            "H_1": H_1,
+            "gamma_1": gamma_1,
+            "beta_1": beta_1,
+            "logits_2": logits_2,
+            "z_inv_2": z_inv_2,
+            "z_env_2": z_env_2,
+            "H_2": H_2,
+            "gamma_2": gamma_2,
+            "beta_2": beta_2,
+        }
+
+    # ── Loss components ───────────────────────────────────────────
+
+    @staticmethod
+    def _invariance_loss(z_inv_1, z_inv_2):
+        """L_inv = ||z_inv_1 - z_inv_2||^2 / d (BYOL-style alignment)."""
+        d = z_inv_1.shape[-1]
+        return ((z_inv_1 - z_inv_2) ** 2).sum(dim=-1).mean() / d
+
+    @staticmethod
+    def _statistical_grounding_loss(H, gamma_hat, beta_hat, eps=1e-8):
+        mu_H = H.mean(dim=[2, 3])
+        sigma_H = (H.var(dim=[2, 3]) + eps).sqrt()
+        return F.mse_loss(sigma_H, gamma_hat) + F.mse_loss(mu_H, beta_hat)
+
+    @staticmethod
+    def _cross_covariance_loss(z_inv, z_env):
+        """Cross-subspace orthogonality only; no internal decorrelation."""
+        n = z_inv.size(0)
+        d_inv = z_inv.size(1)
+        denom = max(n - 1, 1)
+        z_inv_c = z_inv - z_inv.mean(dim=0)
+        z_env_c = z_env - z_env.mean(dim=0)
+        cross_cov = (z_inv_c.T @ z_env_c) / denom
+        return (cross_cov ** 2).sum() / d_inv
+
+    @staticmethod
+    def _variance_loss(z, eps=1e-4):
+        """VICReg-style variance preservation: encourage per-feature std >= 1."""
+        std = (z.var(dim=0, unbiased=False) + eps).sqrt()
+        return F.relu(1.0 - std).mean()
+
+    def _sample_z_env_sim(self, n_samples):
+        """Draw counterfactual style codes from the server's aggregator."""
+        if self.aggregator is None or not getattr(self.aggregator, "fitted", False):
+            return None
+        with torch.no_grad():
+            z = self.aggregator.sample(n_samples)
+        return z.to(self.device)
+
+    def _counterfactual_logits(self, H, eps=1e-8):
+        """Apply foreign style via pooled-AdaIN, return reprojected logits.
+
+        Returns ``None`` when the aggregator is unavailable or has not yet
+        been fitted (round 0 or before ``fcd_cf_start_round``).
+        """
+        B = H.size(0)
+        z_env_sim = self._sample_z_env_sim(B)
+        if z_env_sim is None:
+            return None
+        gamma_sim, beta_sim = self._style_encoder(z_env_sim)
+        gamma_sim = gamma_sim.detach()
+        beta_sim = beta_sim.detach()
+
+        pooled = self._featurizer.gap(H).flatten(1)
+        mu_p = pooled.mean(dim=1, keepdim=True)
+        sigma_p = (pooled.var(dim=1, keepdim=True) + eps).sqrt()
+        pooled_norm = (pooled - mu_p) / sigma_p
+        pooled_cf = gamma_sim * pooled_norm + beta_sim
+        z_inv_cf = self._featurizer.h_inv(pooled_cf)
+        return self._classifier(z_inv_cf)
+
+    # ── Training step ─────────────────────────────────────────────
+
+    def step(self, results):
+        """Compose the five-term FCDv2 objective and backpropagate."""
+        y_true = results["y_true"]
+        z_inv_1, z_inv_2 = results["z_inv_1"], results["z_inv_2"]
+        z_env_1, z_env_2 = results["z_env_1"], results["z_env_2"]
+        H_1, H_2 = results["H_1"], results["H_2"]
+        gamma_1, gamma_2 = results["gamma_1"], results["gamma_2"]
+        beta_1, beta_2 = results["beta_1"], results["beta_2"]
+        logits_1, logits_2 = results["logits_1"], results["logits_2"]
+
+        ce = nn.CrossEntropyLoss()
+
+        # L_inv
+        loss_inv = self._invariance_loss(z_inv_1, z_inv_2)
+
+        # L_stat (averaged across the two views)
+        loss_stat = 0.5 * (
+            self._statistical_grounding_loss(H_1, gamma_1, beta_1, eps=self.eps)
+            + self._statistical_grounding_loss(H_2, gamma_2, beta_2, eps=self.eps)
+        )
+
+        # L_cov_cross (averaged across the two views)
+        loss_cov = 0.5 * (
+            self._cross_covariance_loss(z_inv_1, z_env_1)
+            + self._cross_covariance_loss(z_inv_2, z_env_2)
+        )
+
+        # L_var (both subspaces, both views, summed)
+        loss_var = (
+            self._variance_loss(z_inv_1)
+            + self._variance_loss(z_env_1)
+            + self._variance_loss(z_inv_2)
+            + self._variance_loss(z_env_2)
+        )
+
+        # L_task
+        ce_orig = 0.5 * (ce(logits_1, y_true) + ce(logits_2, y_true))
+        cf_active = (
+            self.aggregator is not None
+            and getattr(self.aggregator, "fitted", False)
+            and getattr(self, "current_server_round", 0) >= self.fcd_cf_start_round
+        )
+        if cf_active:
+            logits_cf_1 = self._counterfactual_logits(H_1, eps=self.eps)
+            logits_cf_2 = self._counterfactual_logits(H_2, eps=self.eps)
+            ce_cf = 0.5 * (ce(logits_cf_1, y_true) + ce(logits_cf_2, y_true))
+            loss_task = 0.5 * (ce_orig + ce_cf)
+        else:
+            loss_task = ce_orig
+            ce_cf = torch.tensor(0.0, device=self.device)
+
+        objective = (
+            self.lambda_task * loss_task
+            + self.lambda_inv * loss_inv
+            + self.lambda_stat * loss_stat
+            + self.lambda_cov * loss_cov
+            + self.lambda_var * loss_var
+        )
+
+        batch_size = z_inv_1.size(0)
+        total_loss = objective.item() * batch_size
+
+        self._last_losses = {
+            "task": loss_task.item() * batch_size,
+            "inv": loss_inv.item() * batch_size,
+            "stat": loss_stat.item() * batch_size,
+            "cov_cross": loss_cov.item() * batch_size,
+            "var": loss_var.item() * batch_size,
+            "cf": (ce_cf.item() if torch.is_tensor(ce_cf) else float(ce_cf)) * batch_size,
+        }
+
+        if objective.grad_fn is not None:
+            objective.backward()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        return total_loss
+
+    # ── Local statistics (unchanged structure) ────────────────────
+
+    def compute_local_env_stats(self):
+        """Empirical (mu, diag-Sigma) of z_env over local data on ORIGINAL images."""
+        self.model.to(self.device)
+        self.model.eval()
+        z_env_all = []
+        with torch.no_grad():
+            for batch in self.dataloader:
+                x, _, _ = batch
+                x = x.to(self.device)
+                z_env_all.append(self._featurizer.extract_env(x).detach().cpu())
+        z_env_cat = torch.cat(z_env_all, dim=0)
+        mu = z_env_cat.mean(dim=0).numpy()
+        cov = torch.diag(z_env_cat.var(dim=0) + 1e-6).numpy()
+        self.local_env_stats = {"mean": mu, "covariance": cov}
+        self.model.to("cpu")
+
+    # ── Training loop ─────────────────────────────────────────────
+
+    def fit(self, server_round):
+        self.current_server_round = server_round
+        self.init_train()
+        loss_keys = ["task", "inv", "stat", "cov_cross", "var", "cf"]
+        total_training_loss = 0.0
+        loss_accum = {k: 0.0 for k in loss_keys}
+
+        for e in range(self.local_epochs):
+            for batch in tqdm(self.dataloader):
+                results = self.process_batch(batch)
+                total_training_loss += self.step(results)
+                for k in loss_keys:
+                    loss_accum[k] += self._last_losses[k]
+
+            if self.hparam.get("wandb", False):
+                n = len(self.dataset)
+                wandb.log(
+                    {
+                        f"loss/{self.client_id}": total_training_loss / n,
+                        **{
+                            f"loss_{k}/{self.client_id}": loss_accum[k] / n
+                            for k in loss_keys
+                        },
+                    },
+                    step=server_round * self.local_epochs + e,
+                )
+
+        self.end_train()
+        self.compute_local_env_stats()
+
+        n_total = len(self.dataset) * max(1, self.local_epochs)
+        return {
+            "total": total_training_loss / n_total,
+            **{k: loss_accum[k] / n_total for k in loss_keys},
+        }

@@ -1025,3 +1025,189 @@ class FCDServer(FedAvg):
                 torch.cuda.empty_cache()
         self.model.to("cpu")
         return metric[0]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FCDv2 server (parallel to FCDServer; not a replacement)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class FCDv2Server(FedAvg):
+    """Server for FCDv2.
+
+    Differences vs FCDServer:
+      * No prototype aggregation / broadcast (L_align is dropped).
+      * Style aggregator is pluggable via ``aggregator_type`` config:
+        ``gaussian | gmm | vae | realnvp``.
+      * Each round, per-client (mu_i, Sigma_i) -> deterministic
+        pseudo-samples -> ``aggregator.fit`` -> aggregator broadcast.
+    """
+
+    def __init__(self, device, ds_bundle, hparam):
+        super().__init__(device, ds_bundle, hparam)
+        from .fcdv2_aggregators import build_aggregator
+
+        self.fcd_gmm_pseudo_samples = hparam.get("fcd_gmm_pseudo_samples", 200)
+        self.aggregator_type = hparam.get("aggregator_type", "gmm")
+
+        proj_dim = int(hparam.get("fcd_proj_dim", 256))
+        self.aggregator = build_aggregator(
+            self.aggregator_type, dim=proj_dim, hparam=hparam
+        )
+
+    # ── Model setup ───────────────────────────────────────────────
+
+    def setup_model(self, model_file=None, start_epoch=0):
+        from .models import (
+            Classifier,
+            FCDv2Featurizer,
+            FCDv2ModelWrapper,
+            SpatialResNetBackbone,
+            StyleEncoder,
+        )
+
+        assert self._round == 0
+        arch = self.hparam.get("fcd_backbone", "resnet18")
+        proj_dim = self.hparam.get("fcd_proj_dim", 256)
+
+        backbone = SpatialResNetBackbone(arch=arch)
+        self._featurizer = FCDv2Featurizer(backbone, proj_dim=proj_dim)
+
+        n_classes = self.ds_bundle.dataset.n_classes
+        self._classifier = Classifier(self._featurizer.n_outputs, n_classes)
+        self._style_encoder = StyleEncoder(z_dim=proj_dim, feat_dim=backbone.n_outputs)
+
+        self.featurizer = nn.DataParallel(self._featurizer)
+        self.classifier = nn.DataParallel(self._classifier)
+        self.model = nn.DataParallel(
+            FCDv2ModelWrapper(self._featurizer, self._classifier, self._style_encoder)
+        )
+
+        if model_file:
+            self.model.load_state_dict(torch.load(model_file, weights_only=True))
+            self._round = int(start_epoch)
+
+    def register_clients(self, clients):
+        self.clients = clients
+        self.num_clients = len(self.clients)
+        for client in tqdm(self.clients):
+            client.setup_model(
+                copy.deepcopy(self._featurizer),
+                copy.deepcopy(self._classifier),
+                copy.deepcopy(self._style_encoder),
+            )
+
+    # ── Transmission ──────────────────────────────────────────────
+
+    def transmit_model(self, sampled_client_indices=None):
+        super().transmit_model(sampled_client_indices)
+        targets = (
+            self.clients
+            if sampled_client_indices is None
+            else [self.clients[idx] for idx in sampled_client_indices]
+        )
+        for client in targets:
+            client.set_aggregator(copy.deepcopy(self.aggregator))
+
+    # ── Aggregator fitting ────────────────────────────────────────
+
+    def aggregate_style(self, sampled_client_indices):
+        """Fit the style aggregator on per-client deterministic pseudo-samples.
+
+        Mirrors FCDServer's pseudo-sample protocol: each client's local
+        Gaussian (mu_i, Sigma_i) is sampled with seed ``round*1000 + idx``,
+        and the pooled samples are fed to the aggregator's ``fit``.
+        """
+        all_samples = []
+        all_indices = []
+        for idx in sampled_client_indices:
+            client = self.clients[idx]
+            if not hasattr(client, "local_env_stats") or client.local_env_stats is None:
+                continue
+            mu = client.local_env_stats["mean"]
+            cov = client.local_env_stats["covariance"]
+            rng = np.random.default_rng(seed=self._round * 1000 + idx)
+            pseudo = rng.multivariate_normal(mu, cov, size=self.fcd_gmm_pseudo_samples)
+            all_samples.append(torch.tensor(pseudo, dtype=torch.float32))
+            all_indices.append(torch.full((len(pseudo),), idx, dtype=torch.long))
+
+        if not all_samples:
+            return  # Round 0 -- no client stats yet.
+
+        x = torch.cat(all_samples, dim=0)
+        i = torch.cat(all_indices, dim=0)
+        self.aggregator.fit(x, i)
+
+    # ── Per-round training loop ───────────────────────────────────
+
+    def update_clients(self, sampled_client_indices):
+        loss_keys = ["total", "task", "inv", "stat", "cov_cross", "var", "cf"]
+        agg_losses = {k: 0.0 for k in loss_keys}
+        selected_total_size = 0
+
+        for idx in tqdm(sampled_client_indices, leave=False):
+            client_losses = self.clients[idx].fit(self._round)
+            client_size = len(self.clients[idx])
+            selected_total_size += client_size
+            if client_losses is not None:
+                for k in loss_keys:
+                    agg_losses[k] += client_losses.get(k, 0.0) * client_size
+
+        if selected_total_size > 0 and self.hparam.get("wandb", False):
+            wandb.log(
+                {
+                    f"server/loss_{k}": agg_losses[k] / selected_total_size
+                    for k in loss_keys
+                },
+                step=self._round * self.hparam.get("local_epochs", 1),
+            )
+        return selected_total_size
+
+    def train_federated_model(self):
+        sampled_client_indices = self.sample_clients()
+        self.transmit_model(sampled_client_indices)
+        selected_total_size = self.update_clients(sampled_client_indices)
+
+        mixing_coefficients = [
+            len(self.clients[idx]) / selected_total_size
+            for idx in sampled_client_indices
+        ]
+        self.aggregate(sampled_client_indices, mixing_coefficients)
+        self.aggregate_style(sampled_client_indices)
+
+    # ── Evaluation ────────────────────────────────────────────────
+
+    def evaluate_global_model(self, dataloader):
+        self.model.eval()
+        self.model.to(self.device)
+
+        with torch.no_grad():
+            y_pred = None
+            y_true = None
+            metadata = None
+            for batch in tqdm(dataloader):
+                data, labels, meta_batch = batch[0], batch[1], batch[2]
+                if isinstance(meta_batch, list):
+                    meta_batch = meta_batch[0]
+                data, labels = data.to(self.device), labels.to(self.device)
+                prediction = self.model(data)
+                if self.ds_bundle.is_classification:
+                    prediction = torch.argmax(prediction, dim=-1)
+
+                if y_pred is None:
+                    y_pred = prediction
+                    y_true = labels
+                    metadata = meta_batch
+                else:
+                    y_pred = torch.cat((y_pred, prediction))
+                    y_true = torch.cat((y_true, labels))
+                    metadata = torch.cat((metadata, meta_batch))
+
+            metric = self.ds_bundle.dataset.eval(
+                y_pred.to("cpu"), y_true.to("cpu"), metadata.to("cpu")
+            )
+            print(metric)
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+        self.model.to("cpu")
+        return metric[0]
