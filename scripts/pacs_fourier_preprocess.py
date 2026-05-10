@@ -1,37 +1,49 @@
-import os
-from src.dataset_bundle import PACS as PACSBundle
-import torch
 import copy
-import time
 import multiprocessing as mp
+import os
+import time
+from pathlib import Path
+
+import torch
+from tqdm.auto import tqdm
 from wilds import get_dataset
 from wilds.common.data_loaders import get_train_loader
+
+from src.dataset_bundle import PACS as PACSBundle
 from src.datasets import PACS
-from tqdm.auto import tqdm
-from pathlib import Path
 
 PACS_DOMAIN_LIST = ["photo", "art_painting", "cartoon", "sketch"]
 
+
 def worker(root_dir, queue):
-    dataset = PACS(version='1.0', root_dir=root_dir, download=True)
-    indices = torch.arange(len(dataset)).reshape(-1,1)
+    dataset = PACS(version="1.0", root_dir=root_dir, download=True)
+    indices = torch.arange(len(dataset)).reshape(-1, 1)
     new_metadata_array = torch.cat((dataset.metadata_array, indices), dim=1)
     ds = PACSBundle(dataset)
     dataset._metadata_array = new_metadata_array
-    train_dataset = dataset.get_subset('train', transform=ds.test_transform)
-    dataloader = get_train_loader("standard", train_dataset, batch_size=64, uniform_over_groups=None, grouper=dataset._eval_grouper, distinct_groups=True, n_groups_per_batch=1)
+    train_dataset = dataset.get_subset("train", transform=ds.test_transform)
+    dataloader = get_train_loader(
+        "standard",
+        train_dataset,
+        batch_size=64,
+        uniform_over_groups=None,
+        grouper=dataset._eval_grouper,
+        distinct_groups=True,
+        n_groups_per_batch=1,
+    )
     for batch in tqdm(dataloader):
         # print("Current Queue Size: {}".format(queue.qsize()))
-        #TODO: update PACS with indices in the metaarray
+        # TODO: update PACS with indices in the metaarray
         with torch.no_grad():
             x, domain = batch[0], batch[2]
-            idx = domain[:,2]
+            idx = domain[:, 2]
             path = dataset._input_array[idx]
             fft = torch.fft.fft2(x)
             amp, pha = torch.abs(fft).data, torch.angle(fft).data
             queue.put([idx, path, amp, pha])
-    print('Worker done, exit!')
-    return 'Done'
+    print("Worker done, exit!")
+    return "Done"
+
 
 def listener(root_dir, process_num, queue):
     while True:
@@ -43,25 +55,29 @@ def listener(root_dir, process_num, queue):
             idx, path, amp, pha = obj
             root_dir = root_dir / Path("pacs_v1.0/")
             for i, idx in enumerate(idx):
-                torch.save(amp[i].clone(), str((root_dir / Path(path[i])).with_suffix(".amp")))
-                torch.save(pha[i].clone(), str((root_dir / Path(path[i])).with_suffix(".pha")))
+                torch.save(
+                    amp[i].clone(), str((root_dir / Path(path[i])).with_suffix(".amp"))
+                )
+                torch.save(
+                    pha[i].clone(), str((root_dir / Path(path[i])).with_suffix(".pha"))
+                )
 
 
-if __name__ == '__main__':
-    root_dir = "/local/scratch/a/shared/datasets/"    
+if __name__ == "__main__":
+    root_dir = "/local/scratch/a/shared/datasets/"
     manager = mp.Manager()
     q = manager.Queue()
     total_processes = 6
     pool = mp.Pool(total_processes)
     watchers = []
     print("starting listener")
-    for i in range(total_processes-1):
+    for i in range(total_processes - 1):
         watcher = pool.apply_async(listener, (root_dir, i, q))
         watchers.append(watcher)
     print("worker")
     job = pool.apply_async(worker, (root_dir, q))
     job.get()
-    for i in range(total_processes-1):
+    for i in range(total_processes - 1):
         q.put("Exit")
     for watcher in watchers:
         watcher.get()
@@ -69,4 +85,3 @@ if __name__ == '__main__':
         pool.close()
     else:
         print(q.size())
-

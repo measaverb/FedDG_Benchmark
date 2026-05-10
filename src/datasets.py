@@ -1,19 +1,19 @@
-import os
 import csv
-from typing import Any, Dict, Optional, Tuple, Union
-import numpy as np
-import torch
-import pandas as pd
-from PIL import Image
+import os
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, Union
 
-from wilds.common.utils import map_to_id_array
-from wilds.common.metrics.all_metrics import Accuracy
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
 from wilds.common.grouper import CombinatorialGrouper
-from wilds.datasets.wilds_dataset import WILDSDataset, WILDSSubset
-from wilds.datasets.iwildcam_dataset import IWildCamDataset
-from wilds.datasets.celebA_dataset import CelebADataset
+from wilds.common.metrics.all_metrics import Accuracy
+from wilds.common.utils import map_to_id_array
 from wilds.datasets.camelyon17_dataset import Camelyon17Dataset
+from wilds.datasets.celebA_dataset import CelebADataset
+from wilds.datasets.iwildcam_dataset import IWildCamDataset
+from wilds.datasets.wilds_dataset import WILDSDataset, WILDSSubset
 
 
 class FourierSubset(WILDSSubset):
@@ -38,7 +38,7 @@ class FourierIwildCam(IWildCamDataset):
         return x, y, [metadata, amp, pha]
 
     def get_fourier(self, idx):
-        path = os.path.join(self._data_dir, 'fourier/')
+        path = os.path.join(self._data_dir, "fourier/")
         amp = torch.load(os.path.join(path, "amp_{}.pt".format(idx)))
         pha = torch.load(os.path.join(path, "pha_{}.pt".format(idx)))
         return amp, pha
@@ -47,17 +47,18 @@ class FourierIwildCam(IWildCamDataset):
 class PACS(WILDSDataset):
     _dataset_name = "pacs"
     _versions_dict = {
-        '1.0': {
+        "1.0": {
             "download_url": "https://worksheets.codalab.org/rest/bundles/0x19f5d1758a184e13aeaea05e0954422a/contents/blob/",
-            "compressed_size": "171_612_540"
-            }
+            "compressed_size": "171_612_540",
+        }
     }
+
     def __init__(
-        self, 
+        self,
         version: str = None,
         root_dir: str = "data",
         download: bool = False,
-        split_scheme: str = "official"
+        split_scheme: str = "official",
     ):
         # Dataset information
         self._version: Optional[str] = version
@@ -68,8 +69,8 @@ class PACS(WILDSDataset):
         # Path of the dataset
         self._data_dir: str = Path(self.initialize_data_dir(root_dir, download))
 
-        # The original dataset contains 7 categories. 
-        if self._split_scheme == 'official':
+        # The original dataset contains 7 categories.
+        if self._split_scheme == "official":
             metadata_filename = "metadata.csv"
         else:
             metadata_filename = "{}.csv".format(self._split_scheme)
@@ -78,27 +79,38 @@ class PACS(WILDSDataset):
         # Load splits
         df = pd.read_csv(self._data_dir / metadata_filename)
         # Filenames
-        self._input_array = df['path'].values
+        self._input_array = df["path"].values
         # Splits
-        self._split_dict = {'train': 0, 'val': 1, 'test': 2, 'id_val': 3, 'id_test': 4}
-        self._split_names = {'train': 'Train', 'val': 'Validation (OOD/Trans)',
-                                'test': 'Test (OOD/Trans)', 'id_val': 'Validation (ID/Cis)',
-                                'id_test': 'Test (ID/Cis)'}
+        self._split_dict = {"train": 0, "val": 1, "test": 2, "id_val": 3, "id_test": 4}
+        self._split_names = {
+            "train": "Train",
+            "val": "Validation (OOD/Trans)",
+            "test": "Test (OOD/Trans)",
+            "id_val": "Validation (ID/Cis)",
+            "id_test": "Test (ID/Cis)",
+        }
 
-        df['split_id'] = df['split'].apply(lambda x: self._split_dict[x])
+        df["split_id"] = df["split"].apply(lambda x: self._split_dict[x])
         self._split_array = df["split_id"].values
         # Y
-        self._y_array = torch.from_numpy(df["y"].values).type(torch.LongTensor)
+        self._y_array = torch.from_numpy(df["y"].values.copy()).type(torch.LongTensor)
         # Populate metadata fields
         self._metadata_fields = ["domain", "y", "idx"]
-        self._metadata_array = torch.tensor(np.stack([df['domain_remapped'].values,
-                            df['y'].values, np.arange(df['y'].shape[0])], axis=1))
+        self._metadata_array = torch.tensor(
+            np.stack(
+                [
+                    df["domain_remapped"].values,
+                    df["y"].values,
+                    np.arange(df["y"].shape[0]),
+                ],
+                axis=1,
+            )
+        )
         self._eval_grouper = CombinatorialGrouper(
-            dataset=self,
-            groupby_fields=(['domain']))
+            dataset=self, groupby_fields=(["domain"])
+        )
 
         super().__init__(root_dir, download, self._split_scheme)
-
 
     def get_input(self, idx) -> str:
         """
@@ -135,17 +147,15 @@ class PACS(WILDSDataset):
             - results_str (str): String summarizing the evaluation metrics
         """
         metric: Accuracy = Accuracy(prediction_fn=prediction_fn)
-        return self.standard_eval(
-            metric, y_pred, y_true
-        )
+        return self.standard_eval(metric, y_pred, y_true)
 
 
 class FourierPACS(PACS):
     def __getitem__(self, idx):
         x, y, metadata = super().__getitem__(idx)
         amp, pha = self.get_fourier(idx)
-        return x,y,[metadata, amp, pha]
-    
+        return x, y, [metadata, amp, pha]
+
     def get_fourier(self, idx):
         img_path = Path(self.data_dir / self._input_array[idx])
         amp_path = img_path.with_suffix(".amp")
@@ -158,17 +168,18 @@ class FourierPACS(PACS):
 class FEMNIST(WILDSDataset):
     _dataset_name = "femnist"
     _versions_dict = {
-        '1.0': {
+        "1.0": {
             "download_url": "https://worksheets.codalab.org/rest/bundles/0x7704c8584dac49d8b8c3de5d3c617c2d/contents/blob/",
-            "compressed_size": "113_126_1007"
-            }
+            "compressed_size": "113_126_1007",
+        }
     }
+
     def __init__(
-        self, 
+        self,
         version: str = None,
         root_dir: str = "data",
         download: bool = False,
-        split_scheme: str = "official"
+        split_scheme: str = "official",
     ):
         # Dataset information
         self._version: Optional[str] = version
@@ -179,34 +190,45 @@ class FEMNIST(WILDSDataset):
         # Path of the dataset
         self._data_dir: str = Path(self.initialize_data_dir(root_dir, download))
 
-        # The original dataset contains 7 categories. 
+        # The original dataset contains 7 categories.
         metadata_filename = "metadata.csv"
         self._n_classes = 62
 
         # Load splits
         df = pd.read_csv(self._data_dir / metadata_filename)
         # Filenames
-        self._input_array = df['path'].values
+        self._input_array = df["path"].values
         # Splits
-        self._split_dict = {'train': 0, 'val': 1, 'test': 2, 'id_val': 3, 'id_test': 4}
-        self._split_names = {'train': 'Train', 'val': 'Validation (OOD/Trans)',
-                                'test': 'Test (OOD/Trans)', 'id_val': 'Validation (ID/Cis)',
-                                'id_test': 'Test (ID/Cis)'}
+        self._split_dict = {"train": 0, "val": 1, "test": 2, "id_val": 3, "id_test": 4}
+        self._split_names = {
+            "train": "Train",
+            "val": "Validation (OOD/Trans)",
+            "test": "Test (OOD/Trans)",
+            "id_val": "Validation (ID/Cis)",
+            "id_test": "Test (ID/Cis)",
+        }
 
-        df['split_id'] = df['split'].apply(lambda x: self._split_dict[x])
+        df["split_id"] = df["split"].apply(lambda x: self._split_dict[x])
         self._split_array = df["split_id"].values
         # Y
-        self._y_array = torch.from_numpy(df["y"].values).type(torch.LongTensor)
+        self._y_array = torch.from_numpy(df["y"].values.copy()).type(torch.LongTensor)
         # Populate metadata fields
         self._metadata_fields = ["domain", "y", "idx"]
-        self._metadata_array = torch.tensor(np.stack([df['domain_remapped'].values,
-                            df['y'].values, np.arange(df['y'].shape[0])], axis=1))
+        self._metadata_array = torch.tensor(
+            np.stack(
+                [
+                    df["domain_remapped"].values,
+                    df["y"].values,
+                    np.arange(df["y"].shape[0]),
+                ],
+                axis=1,
+            )
+        )
         self._eval_grouper = CombinatorialGrouper(
-            dataset=self,
-            groupby_fields=(['domain']))
+            dataset=self, groupby_fields=(["domain"])
+        )
 
         super().__init__(root_dir, download, self._split_scheme)
-
 
     def get_input(self, idx) -> str:
         """
@@ -242,16 +264,15 @@ class FEMNIST(WILDSDataset):
             - results_str (str): String summarizing the evaluation metrics
         """
         metric: Accuracy = Accuracy(prediction_fn=prediction_fn)
-        return self.standard_eval(
-            metric, y_pred, y_true
-        )
+        return self.standard_eval(metric, y_pred, y_true)
+
 
 class FourierFEMNIST(FEMNIST):
     def __getitem__(self, idx):
         x, y, metadata = super().__getitem__(idx)
         amp, pha = self.get_fourier(idx)
-        return x,y,[metadata, amp, pha]
-    
+        return x, y, [metadata, amp, pha]
+
     def get_fourier(self, idx):
         img_path = Path(self.data_dir / self._input_array[idx])
         amp_path = img_path.with_suffix(".amp")
@@ -264,17 +285,18 @@ class FourierFEMNIST(FEMNIST):
 class OfficeHome(WILDSDataset):
     _dataset_name = "office_home"
     _versions_dict = {
-        '1.0': {
+        "1.0": {
             "download_url": "https://drive.google.com/uc?id=1JFr8f805nMUelQWWmfnJR3y4_SYoN5Pd",
-            "compressed_size": "174_167_459"
-            }
+            "compressed_size": "174_167_459",
+        }
     }
+
     def __init__(
-        self, 
+        self,
         version: str = None,
         root_dir: str = "data",
         download: bool = False,
-        split_scheme: str = "official"
+        split_scheme: str = "official",
     ):
         # Dataset information
         self._version: Optional[str] = version
@@ -285,8 +307,8 @@ class OfficeHome(WILDSDataset):
         # Path of the dataset
         self._data_dir: str = Path(self.initialize_data_dir(root_dir, download))
 
-        # The original dataset contains 7 categories. 
-        if self._split_scheme == 'official':
+        # The original dataset contains 7 categories.
+        if self._split_scheme == "official":
             metadata_filename = "metadata.csv"
         else:
             metadata_filename = "{}.csv".format(self._split_scheme)
@@ -295,27 +317,38 @@ class OfficeHome(WILDSDataset):
         # Load splits
         df = pd.read_csv(self._data_dir / metadata_filename)
         # Filenames
-        self._input_array = df['path'].values
+        self._input_array = df["path"].values
         # Splits
-        self._split_dict = {'train': 0, 'val': 1, 'test': 2, 'id_val': 3, 'id_test': 4}
-        self._split_names = {'train': 'Train', 'val': 'Validation (OOD/Trans)',
-                                'test': 'Test (OOD/Trans)', 'id_val': 'Validation (ID/Cis)',
-                                'id_test': 'Test (ID/Cis)'}
-        print(df['split'])
-        df['split_id'] = df['split'].apply(lambda x: self._split_dict[x])
+        self._split_dict = {"train": 0, "val": 1, "test": 2, "id_val": 3, "id_test": 4}
+        self._split_names = {
+            "train": "Train",
+            "val": "Validation (OOD/Trans)",
+            "test": "Test (OOD/Trans)",
+            "id_val": "Validation (ID/Cis)",
+            "id_test": "Test (ID/Cis)",
+        }
+
+        df["split_id"] = df["split"].apply(lambda x: self._split_dict[x])
         self._split_array = df["split_id"].values
         # Y
-        self._y_array = torch.from_numpy(df["y"].values).type(torch.LongTensor)
+        self._y_array = torch.from_numpy(df["y"].values.copy()).type(torch.LongTensor)
         # Populate metadata fields
         self._metadata_fields = ["domain", "y", "idx"]
-        self._metadata_array = torch.tensor(np.stack([df['domain_remapped'].values,
-                            df['y'].values, np.arange(df['y'].shape[0])], axis=1))
+        self._metadata_array = torch.tensor(
+            np.stack(
+                [
+                    df["domain_remapped"].values,
+                    df["y"].values,
+                    np.arange(df["y"].shape[0]),
+                ],
+                axis=1,
+            )
+        )
         self._eval_grouper = CombinatorialGrouper(
-            dataset=self,
-            groupby_fields=(['domain']))
+            dataset=self, groupby_fields=(["domain"])
+        )
 
         super().__init__(root_dir, download, self._split_scheme)
-
 
     def get_input(self, idx) -> str:
         """
@@ -352,17 +385,15 @@ class OfficeHome(WILDSDataset):
             - results_str (str): String summarizing the evaluation metrics
         """
         metric: Accuracy = Accuracy(prediction_fn=prediction_fn)
-        return self.standard_eval(
-            metric, y_pred, y_true
-        )
+        return self.standard_eval(metric, y_pred, y_true)
 
 
 class FourierOfficeHome(OfficeHome):
     def __getitem__(self, idx):
         x, y, metadata = super().__getitem__(idx)
         amp, pha = self.get_fourier(idx)
-        return x,y,[metadata, amp, pha]
-    
+        return x, y, [metadata, amp, pha]
+
     def get_fourier(self, idx):
         img_path = Path(self.data_dir / self._input_array[idx])
         amp_path = img_path.with_suffix(".amp")
@@ -376,8 +407,8 @@ class FourierCelebA(CelebADataset):
     def __getitem__(self, idx):
         x, y, metadata = super().__getitem__(idx)
         amp, pha = self.get_fourier(idx)
-        return x,y,[metadata, amp, pha]
-    
+        return x, y, [metadata, amp, pha]
+
     def get_fourier(self, idx):
         img_path = Path(self.data_dir) / "img_align_celeba" / self._input_array[idx]
         amp_path = img_path.with_suffix(".amp")
@@ -387,13 +418,12 @@ class FourierCelebA(CelebADataset):
         return amp, pha
 
 
-
 class FourierCamelyon17(Camelyon17Dataset):
     def __getitem__(self, idx):
         x, y, metadata = super().__getitem__(idx)
         amp, pha = self.get_fourier(idx)
-        return x,y,[metadata, amp, pha]
-    
+        return x, y, [metadata, amp, pha]
+
     def get_fourier(self, idx):
         img_path = Path(self.data_dir) / self._input_array[idx]
         amp_path = img_path.with_suffix(".amp")
