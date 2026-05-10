@@ -645,6 +645,9 @@ def build_aggregator(name: str, dim: int, hparam: Optional[dict] = None) -> Fede
         )
     hparam = hparam or {}
     cls = _AGGREGATOR_REGISTRY[name]
+    device = hparam.get("fcdv2_aggregator_device")
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     if cls is FCDv2_Gaussian:
         return cls(dim=dim)
     if cls is FCDv2_GMM:
@@ -658,11 +661,13 @@ def build_aggregator(name: str, dim: int, hparam: Optional[dict] = None) -> Fede
             dim=dim,
             latent_dim=int(hparam.get("fcdv2_vae_latent_dim", 32)),
             epochs=int(hparam.get("fcdv2_vae_epochs", 50)),
+            device=device,
         )
     if cls is FCDv2_RealNVP:
         return cls(
             dim=dim,
             n_layers=int(hparam.get("fcdv2_realnvp_layers", 6)),
             epochs=int(hparam.get("fcdv2_realnvp_epochs", 100)),
+            device=device,
         )
     raise RuntimeError("unreachable")
