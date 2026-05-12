@@ -180,8 +180,8 @@ def main(args):
                 loader="standard",
                 dataset=ds,
                 batch_size=hparam["batch_size"],
-                num_workers=hparam.get("num_workers", 4),
-                pin_memory=hparam.get("num_workers", 4) > 0,
+                num_workers=hparam.get("num_workers", 16),
+                pin_memory=hparam.get("num_workers", 16) > 0,
             )
             testloader[split] = dl
 
@@ -190,8 +190,8 @@ def main(args):
         total_subset,
         batch_size=hparam["batch_size"],
         sampler=sampler,
-        num_workers=hparam.get("num_workers", 4),
-        pin_memory=hparam.get("num_workers", 4) > 0,
+        num_workers=hparam.get("num_workers", 16),
+        pin_memory=hparam.get("num_workers", 16) > 0,
     )
 
     num_shards = hparam["num_clients"]
