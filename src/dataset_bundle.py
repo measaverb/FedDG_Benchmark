@@ -368,6 +368,16 @@ class OfficeHome(PACS):
         super().__init__(dataset, probabilistic)
 
 
+class DomainNet(PACS):
+    def __init__(self, dataset, probabilistic=False) -> None:
+        super().__init__(dataset, probabilistic)
+
+
+class VLCS(PACS):
+    def __init__(self, dataset, probabilistic=False) -> None:
+        super().__init__(dataset, probabilistic)
+
+
 class CelebA(PACS):
     @property
     def _input_shape(self):

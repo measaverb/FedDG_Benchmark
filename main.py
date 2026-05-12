@@ -50,6 +50,8 @@ def main(args):
     data_path = hparam["data_path"]
     if not os.path.exists(data_path + "opt_dict/"):
         os.makedirs(data_path + "opt_dict/")
+    if not os.path.exists(data_path + "sch_dict/"):
+        os.makedirs(data_path + "sch_dict/")
     if not os.path.exists(data_path + "models/"):
         os.makedirs(data_path + "models/")
 
@@ -80,6 +82,20 @@ def main(args):
             version="1.0",
             root_dir=hparam["dataset_path"],
             download=True,
+            split_scheme=hparam["split_scheme"],
+        )
+    elif hparam["dataset"].lower() == "domainnet":
+        dataset = my_datasets.DomainNet(
+            version="1.0",
+            root_dir=hparam["dataset_path"],
+            download=False,
+            split_scheme=hparam["split_scheme"],
+        )
+    elif hparam["dataset"].lower() == "vlcs":
+        dataset = my_datasets.VLCS(
+            version="1.0",
+            root_dir=hparam["dataset_path"],
+            download=False,
             split_scheme=hparam["split_scheme"],
         )
     elif hparam["dataset"].lower() == "femnist":
@@ -161,13 +177,21 @@ def main(args):
         if split != "train":
             ds = dataset.get_subset(split, transform=ds_bundle.test_transform)
             dl = get_eval_loader(
-                loader="standard", dataset=ds, batch_size=hparam["batch_size"]
+                loader="standard",
+                dataset=ds,
+                batch_size=hparam["batch_size"],
+                num_workers=hparam.get("num_workers", 4),
+                pin_memory=hparam.get("num_workers", 4) > 0,
             )
             testloader[split] = dl
 
     sampler = RandomSampler(total_subset, replacement=True)
     global_dataloader = DataLoader(
-        total_subset, batch_size=hparam["batch_size"], sampler=sampler
+        total_subset,
+        batch_size=hparam["batch_size"],
+        sampler=sampler,
+        num_workers=hparam.get("num_workers", 4),
+        pin_memory=hparam.get("num_workers", 4) > 0,
     )
 
     num_shards = hparam["num_clients"]

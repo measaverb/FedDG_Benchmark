@@ -403,6 +403,158 @@ class FourierOfficeHome(OfficeHome):
         return amp, pha
 
 
+class DomainNet(WILDSDataset):
+    _dataset_name = "domainnet"
+    _versions_dict = {
+        "1.0": {
+            "download_url": None,
+            "compressed_size": "18_500_000_000",
+        }
+    }
+
+    def __init__(
+        self,
+        version: str = None,
+        root_dir: str = "data",
+        download: bool = False,
+        split_scheme: str = "official",
+    ):
+        self._version: Optional[str] = version
+        self._split_scheme: str = split_scheme
+        self._original_resolution = (224, 224)
+        self._y_type: str = "long"
+        self._y_size: int = 1
+        self._data_dir: str = Path(self.initialize_data_dir(root_dir, download))
+
+        if self._split_scheme == "official":
+            metadata_filename = "metadata.csv"
+        else:
+            metadata_filename = "{}.csv".format(self._split_scheme)
+
+        df = pd.read_csv(self._data_dir / metadata_filename)
+        self._n_classes = int(df["y"].max()) + 1
+        self._input_array = df["path"].values
+        self._split_dict = {"train": 0, "val": 1, "test": 2, "id_val": 3, "id_test": 4}
+        self._split_names = {
+            "train": "Train",
+            "val": "Validation (OOD/Trans)",
+            "test": "Test (OOD/Trans)",
+            "id_val": "Validation (ID/Cis)",
+            "id_test": "Test (ID/Cis)",
+        }
+
+        df["split_id"] = df["split"].apply(lambda x: self._split_dict[x])
+        self._split_array = df["split_id"].values
+        self._y_array = torch.from_numpy(df["y"].values.copy()).type(torch.LongTensor)
+        self._metadata_fields = ["domain", "y", "idx"]
+        self._metadata_array = torch.tensor(
+            np.stack(
+                [
+                    df["domain_remapped"].values,
+                    df["y"].values,
+                    np.arange(df["y"].shape[0]),
+                ],
+                axis=1,
+            )
+        )
+        self._eval_grouper = CombinatorialGrouper(
+            dataset=self, groupby_fields=(["domain"])
+        )
+
+        super().__init__(root_dir, download, self._split_scheme)
+
+    def get_input(self, idx) -> str:
+        img_path = self.data_dir / self._input_array[idx]
+        img = Image.open(img_path).convert("RGB")
+        return img
+
+    def eval(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.LongTensor,
+        metadata: torch.Tensor,
+        prediction_fn=None,
+    ) -> Tuple[Dict[str, Any], str]:
+        metric: Accuracy = Accuracy(prediction_fn=prediction_fn)
+        return self.standard_eval(metric, y_pred, y_true)
+
+
+class VLCS(WILDSDataset):
+    _dataset_name = "vlcs"
+    _versions_dict = {
+        "1.0": {
+            "download_url": None,
+            "compressed_size": "203_000_000",
+        }
+    }
+
+    def __init__(
+        self,
+        version: str = None,
+        root_dir: str = "data",
+        download: bool = False,
+        split_scheme: str = "official",
+    ):
+        self._version: Optional[str] = version
+        self._split_scheme: str = split_scheme
+        self._original_resolution = (224, 224)
+        self._y_type: str = "long"
+        self._y_size: int = 1
+        self._data_dir: str = Path(self.initialize_data_dir(root_dir, download))
+
+        if self._split_scheme == "official":
+            metadata_filename = "metadata.csv"
+        else:
+            metadata_filename = "{}.csv".format(self._split_scheme)
+
+        df = pd.read_csv(self._data_dir / metadata_filename)
+        self._n_classes = int(df["y"].max()) + 1
+        self._input_array = df["path"].values
+        self._split_dict = {"train": 0, "val": 1, "test": 2, "id_val": 3, "id_test": 4}
+        self._split_names = {
+            "train": "Train",
+            "val": "Validation (OOD/Trans)",
+            "test": "Test (OOD/Trans)",
+            "id_val": "Validation (ID/Cis)",
+            "id_test": "Test (ID/Cis)",
+        }
+
+        df["split_id"] = df["split"].apply(lambda x: self._split_dict[x])
+        self._split_array = df["split_id"].values
+        self._y_array = torch.from_numpy(df["y"].values.copy()).type(torch.LongTensor)
+        self._metadata_fields = ["domain", "y", "idx"]
+        self._metadata_array = torch.tensor(
+            np.stack(
+                [
+                    df["domain_remapped"].values,
+                    df["y"].values,
+                    np.arange(df["y"].shape[0]),
+                ],
+                axis=1,
+            )
+        )
+        self._eval_grouper = CombinatorialGrouper(
+            dataset=self, groupby_fields=(["domain"])
+        )
+
+        super().__init__(root_dir, download, self._split_scheme)
+
+    def get_input(self, idx) -> str:
+        img_path = self.data_dir / self._input_array[idx]
+        img = Image.open(img_path).convert("RGB")
+        return img
+
+    def eval(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.LongTensor,
+        metadata: torch.Tensor,
+        prediction_fn=None,
+    ) -> Tuple[Dict[str, Any], str]:
+        metric: Accuracy = Accuracy(prediction_fn=prediction_fn)
+        return self.standard_eval(metric, y_pred, y_true)
+
+
 class FourierCelebA(CelebADataset):
     def __getitem__(self, idx):
         x, y, metadata = super().__getitem__(idx)

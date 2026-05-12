@@ -170,6 +170,11 @@ resources/py150_v1.0/
 resources/civilcomments_v1.0/
 resources/officehome_v1.0/
 resources/celebA_v1.0/
+resources/office_home_v1.0/
+resources/domainnet_v1.0/
+splits_mini.zip
+vlcs.zip
+domainnet/
 wandb_export/
 tsne_fcd/
 tsne_sweep_env.png

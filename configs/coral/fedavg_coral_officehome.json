@@ -1,6 +1,6 @@
 {
   "id": "fedavg_coral_officehome",
-  "data_path": "resources/officehome_v1.0/",
+  "data_path": "resources/office_home_v1.0/",
   "dataset_path": "resources/",
   "dataset": "OfficeHome",
   "split_scheme": "official",

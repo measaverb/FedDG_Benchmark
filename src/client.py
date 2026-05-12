@@ -59,6 +59,9 @@ class ERM(object):
             grouper=self.ds_bundle.grouper,
             distinct_groups=False,
             n_groups_per_batch=self.n_groups_per_batch,
+            num_workers=self.hparam.get("num_workers", 4),
+            pin_memory=self.hparam.get("num_workers", 4) > 0,
+            persistent_workers=self.hparam.get("num_workers", 4) > 0,
         )
         self.saved_optimizer = False
         self.opt_dict_path = "{}opt_dict/client_{}.pt".format(
@@ -476,6 +479,9 @@ class Mixup(ERM):
             grouper=self.ds_bundle.grouper,
             distinct_groups=True,
             n_groups_per_batch=self.n_groups_per_batch,
+            num_workers=self.hparam.get("num_workers", 4),
+            pin_memory=self.hparam.get("num_workers", 4) > 0,
+            persistent_workers=self.hparam.get("num_workers", 4) > 0,
         )
         self.alpha = hparam["hparam1"]
 
