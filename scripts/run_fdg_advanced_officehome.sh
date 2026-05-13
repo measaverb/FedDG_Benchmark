@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 #
-# Run advanced FedDG baselines on miniDomainNet (ResNet-50 backbone, the default)
-# under the non-IID, large-client regime:
+# Run advanced FedDG baselines on OfficeHome (ResNet-50 backbone, the default)
+# under the non-IID, large-client regime that matches run_fdg_advanced_minidomainnet.sh:
 #
 #     num_clients = 100
 #     iid         = 0.0
 #     fraction    = 0.2
 #     n_groups_per_batch = 1   (each client holds a single domain shard under iid=0)
-#     num_workers = 4          (100 clients × 16 workers would spawn 1600 processes
-#                               on a 20-thread CPU under persistent_workers=True)
+#     num_workers = 4
 #
-# Default L2DO baked into minidomainnet.csv: val=painting, test=real.
-# Train pool = {clipart, sketch}; under case-A splitter the 100 shards are roughly
-# proportional to per-domain row counts (≈44 clipart, ≈56 sketch).
+# Default L2DO baked into resources/office_home_v1.0/metadata.csv:
+#     val=art, test=real_world. Train pool = {clipart, product}.
+# Train pool has ~7,924 rows -> ~80 rows per client at num_clients=100.
 #
 # Methods (server -> client):
 #   FedAvg    FedAvg          ERM            (vanilla federated baseline)
-#   FCDv2     FCDv2Server     FCDv2Client    (vae aggregator, resnet50)
+#   FCDv2     FCDv2Server     FCDv2Client    (gaussian aggregator, resnet50)
 #   FedProx   FedAvg          FedProx
 #   Scaffold  ScaffoldServer  ScaffoldClient
 #   AFL       AFLServer       AFLClient
@@ -25,27 +24,26 @@
 #   FedGMA    FedGMA          ERM            (FedGMA is a server-side aggregation)
 #
 # Usage:
-#   bash scripts/run_fdg_advanced_minidomainnet.sh                  # all 7, wandb on
-#   ROUNDS=30 bash scripts/run_fdg_advanced_minidomainnet.sh        # override num_rounds for all
-#   METHODS="FedProx FedSR" bash scripts/run_fdg_advanced_minidomainnet.sh   # subset
-#   NO_WANDB=1 bash scripts/run_fdg_advanced_minidomainnet.sh       # disable wandb (smoke/debug)
-#   WANDB_GROUP=my_sweep bash scripts/run_fdg_advanced_minidomainnet.sh  # override default group
+#   bash scripts/run_fdg_advanced_officehome.sh                  # all 7, wandb on
+#   ROUNDS=30 bash scripts/run_fdg_advanced_officehome.sh        # override num_rounds for all
+#   METHODS="FedProx FedSR" bash scripts/run_fdg_advanced_officehome.sh   # subset
+#   NO_WANDB=1 bash scripts/run_fdg_advanced_officehome.sh       # disable wandb
+#   WANDB_GROUP=my_sweep bash scripts/run_fdg_advanced_officehome.sh
 
 set -u
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
 
 WANDB_FLAG=""
 if [[ "${NO_WANDB:-0}" != "0" ]]; then
   WANDB_FLAG="--no_wandb"
 fi
 
-# All methods in a sweep land in the same wandb group/project for easy comparison.
-WANDB_GROUP="${WANDB_GROUP:-minidomainnet_n100_iid0_frac20}"
-WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-FedDG_Benchmark_minidomainnet}"
+WANDB_GROUP="${WANDB_GROUP:-officehome_n100_iid0_frac20}"
+WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-FedDG_Benchmark_officehome}"
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$REPO_ROOT"
-
-LOG_DIR="logs/fdg_advanced_minidomainnet"
+LOG_DIR="logs/fdg_advanced_officehome"
 CONFIG_DIR="${LOG_DIR}/configs"
 mkdir -p "$LOG_DIR" "$CONFIG_DIR"
 
@@ -78,7 +76,7 @@ for entry in "${BASELINES[@]}"; do
     continue
   fi
 
-  name="${tag,,}_minidomainnet_n100_iid0"
+  name="${tag,,}_officehome_n100_iid0"
   config_path="${CONFIG_DIR}/${name}.json"
   log_path="${LOG_DIR}/${name}.log"
 
@@ -88,9 +86,9 @@ template, out_path, run_id = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(template) as f:
     c = json.load(f)
 c["id"] = run_id
-c["dataset"] = "DomainNet"
-c["split_scheme"] = "minidomainnet"
-c["data_path"] = "resources/domainnet_v1.0/"
+c["dataset"] = "OfficeHome"
+c["split_scheme"] = "official"
+c["data_path"] = "resources/office_home_v1.0/"
 c["dataset_path"] = "resources/"
 c["num_clients"] = 100
 c["iid"] = 0.0
