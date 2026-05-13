@@ -181,3 +181,11 @@ tsne_sweep_env.png
 tsne_sweep_inv.png
 umap_z_env_sweep_env.png
 umap_z_env_sweep_inv.png
+resources/pacs_v1.0/*.csv
+
+resources/camelyon17_v1.0
+resources/celebA_v1.0
+resources/camelyon17_v1.0
+resources/pacs_v1.0
+resources/iwildcam_v2.0
+logs/

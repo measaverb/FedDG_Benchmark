@@ -1,8 +1,30 @@
 import argparse
 import gc
+import resource
 
 import torch
 import torch.cuda
+import torch.multiprocessing as torch_mp
+
+# Linux PAM commonly starts processes with RLIMIT_NOFILE soft=1024 even when
+# the hard limit is much larger. With 100 clients * N workers, the main proc
+# crosses 1024 FDs quickly and worker forks fail with EMFILE (e.g. PIL listdir
+# during plugin preinit). Raise soft to hard so we use the full available
+# budget. Best-effort: ignore failures (containers / restrictive sandboxes).
+try:
+    _nofile_soft, _nofile_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (_nofile_hard, _nofile_hard))
+except (ValueError, OSError):
+    pass
+
+# DataLoader worker IPC uses shared-memory tensors. The default "file_descriptor"
+# strategy allocates one FD per shared tensor, which compounds the FD pressure
+# from many DataLoaders. file_system uses named /dev/shm regions instead.
+try:
+    torch_mp.set_sharing_strategy("file_system")
+except RuntimeError:
+    pass
+
 from wilds import get_dataset
 from wilds.common.data_loaders import get_eval_loader
 
@@ -33,7 +55,9 @@ def main(args):
     with open(config_file) as fh:
         config = json.load(fh)
     hparam.update(config)
-    wandb_project = WANDB_PROJECT + "_" + hparam["dataset"]
+    wandb_project = hparam.get("wandb_project") or (
+        WANDB_PROJECT + "_" + hparam["dataset"]
+    )
     # setup WanDB
     if not args.no_wandb:
         wandb.init(project=wandb_project, entity=WANDB_ENTITY, config=hparam, group=hparam.get("wandb_group", None))
